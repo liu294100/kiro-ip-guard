@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import re
+import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
+
+import certifi
 
 GITHUB_REPOSITORY = "liu294100/kiro-ip-guard"
 GITHUB_LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases/latest"
@@ -43,8 +46,9 @@ def check_latest_release(current_version: str, timeout: int = 8) -> ReleaseInfo 
         headers={"User-Agent": f"Kiro-IP-Guard/{current_version}"},
         method="HEAD",
     )
+    context = ssl.create_default_context(cafile=certifi.where())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
             html_url = response.geturl()
     except urllib.error.HTTPError as exc:
         if exc.code == 404:

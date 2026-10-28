@@ -10,7 +10,7 @@ if not exist ".venv\Scripts\python.exe" "%BUILD_PYTHON%" -m venv .venv
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 .venv\Scripts\python -m pip install --disable-pip-version-check -r requirements-build.txt
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-.venv\Scripts\python -m PyInstaller --noconfirm --clean --onefile --windowed --name KiroIPGuard --icon "assets\kiro-ip-guard.ico" --add-data "assets;assets" --collect-all pystray run_guard.py
+.venv\Scripts\python -m PyInstaller --noconfirm --clean --onefile --windowed --name KiroIPGuard --icon "assets\kiro-ip-guard.ico" --add-data "assets;assets" --collect-all pystray --collect-data certifi run_guard.py
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 echo Build completed in: %ROOT%\dist
 exit /b 0
