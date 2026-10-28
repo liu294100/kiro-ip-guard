@@ -3,7 +3,10 @@ setlocal
 for %%I in ("%~dp0\..\..") do set "ROOT=%%~fI"
 
 cd /d "%ROOT%"
-if not exist ".venv\Scripts\python.exe" python -m venv .venv
+rem In GitHub Actions, use the exact interpreter installed by actions/setup-python.
+set "BUILD_PYTHON=python"
+if defined PythonLocation set "BUILD_PYTHON=%PythonLocation%\python.exe"
+if not exist ".venv\Scripts\python.exe" "%BUILD_PYTHON%" -m venv .venv
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 .venv\Scripts\python -m pip install --disable-pip-version-check -r requirements-build.txt
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
