@@ -122,7 +122,7 @@ python3 -m venv .venv
 | `config_version` | `2` | 配置格式版本；旧版默认 `direct` 会在首次加载时自动迁移为 `auto` |
 | `ip_query_network_mode` | `auto` | `auto` 在系统代理启用时查代理出口，否则走直连/TUN 路由；另两项为手动固定模式 |
 | `language` | `auto` | `zh-CN`、`en` 或 `auto`（跟随系统语言） |
-| `check_updates` | `true` | 启动后及每 24 小时检查一次 GitHub Releases；失败不影响防护 |
+| `check_updates` | `true` | 启动后及每 2 小时检查一次 GitHub Releases；失败不影响防护 |
 | `check_interval_seconds` | `1` | 策略检查周期，最小 1 秒；每次都会重新判断是否合规 |
 | `cache_ttl_seconds` | `600` | 同一 IP 对应的 GeoIP/地区缓存秒数；当前出口 IP 不缓存；`0` 禁用地区缓存 |
 | `allowed_country_codes` | `["US"]` | ISO 3166-1 alpha-2 白名单；空数组表示不限制 |

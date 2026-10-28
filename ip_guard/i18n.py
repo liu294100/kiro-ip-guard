@@ -56,7 +56,7 @@ EN_TRANSLATIONS = {
     "关闭开机启动": "Disable login startup",
     "源码模式会记录当前虚拟环境；onefile 或 macOS App 模式会记录当前可执行文件。移动程序位置后，请重新开启一次开机启动。": "Source mode records the current virtual environment. Onefile and macOS App modes record the current executable. Re-enable startup after moving the app.",
     "软件更新": "Software updates",
-    "启动后自动检查 GitHub Releases；持续运行时每 24 小时检查一次": "Check GitHub Releases after startup and every 24 hours while running",
+    "启动后自动检查 GitHub Releases；持续运行时每 2 小时检查一次": "Check GitHub Releases after startup and every 2 hours while running",
     "检查更新": "Check for updates",
     "当前版本：v{version}": "Current version: v{version}",
     "尚未检查更新": "Updates have not been checked",

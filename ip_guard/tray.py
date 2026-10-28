@@ -19,7 +19,7 @@ from .resources import icon_path
 from .update import ReleaseInfo, check_latest_release
 
 LOG = logging.getLogger("kiro_ip_guard")
-_UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
+_UPDATE_INTERVAL_SECONDS = 2 * 60 * 60
 
 
 class TrayApplication:

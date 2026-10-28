@@ -11,7 +11,7 @@ Kiro IP Guard is a Windows and macOS tray application that requires an active sy
 - Concurrent public IP queries with per-IP GeoIP caching.
 - Chinese, English, and system-language UI modes.
 - User-level login startup.
-- Optional GitHub Releases checks at startup and every 24 hours.
+- Optional GitHub Releases checks at startup and every 2 hours.
 - PyInstaller onefile packages.
 - GitHub Actions CI and tag-based GitHub Releases.
 

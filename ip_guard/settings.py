@@ -467,7 +467,7 @@ class SettingsWindow:
         update_frame.pack(fill="x")
         ttk.Checkbutton(
             update_frame,
-            text=self._t("启动后自动检查 GitHub Releases；持续运行时每 24 小时检查一次"),
+            text=self._t("启动后自动检查 GitHub Releases；持续运行时每 2 小时检查一次"),
             variable=self.vars["check_updates"],
         ).pack(anchor="w")
         update_actions = ttk.Frame(update_frame)
