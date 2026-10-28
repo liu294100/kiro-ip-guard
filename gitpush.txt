@@ -1,0 +1,5 @@
+git add ip_guard/__init__.py
+git commit -m "Bump version to 1.4.1"
+git push
+git tag v1.4.1
+git push origin v1.4.1

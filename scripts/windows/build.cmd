@@ -3,7 +3,7 @@ setlocal
 for %%I in ("%~dp0\..\..") do set "ROOT=%%~fI"
 
 cd /d "%ROOT%"
-if not exist ".venv\Scripts\python.exe" py -m venv .venv
+if not exist ".venv\Scripts\python.exe" python -m venv .venv
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 .venv\Scripts\python -m pip install --disable-pip-version-check -r requirements-build.txt
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
