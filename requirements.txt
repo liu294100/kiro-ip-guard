@@ -1,3 +1,0 @@
-Pillow==11.3.0
-psutil==7.0.0
-pystray==0.19.5
