@@ -173,7 +173,7 @@ def config_from_form(values: Mapping[str, object]) -> GuardConfig:
         ip_query_network_mode=network_mode,
         language=language,
         check_updates=_as_bool(values.get("check_updates", True)),
-        auto_install_updates=_as_bool(values.get("auto_install_updates", False)),
+        auto_install_updates=_as_bool(values.get("auto_install_updates", True)),
         check_interval_seconds=interval,
         cache_ttl_seconds=cache_ttl,
         request_timeout_seconds=timeout,

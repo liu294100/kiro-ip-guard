@@ -112,7 +112,7 @@ class GuardConfig:
     ip_query_network_mode: str = "auto"
     language: str = "auto"
     check_updates: bool = True
-    auto_install_updates: bool = False
+    auto_install_updates: bool = True
     check_interval_seconds: int = 1
     cache_ttl_seconds: int = 600
     request_timeout_seconds: int = 8

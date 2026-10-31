@@ -20,7 +20,7 @@
   3. Replaces the running build. On Windows, the running `KiroIPGuard.exe` is renamed to `.exe.old` and the new executable is put in its place. On macOS, the package is extracted with `ditto` so signatures and permissions are kept, and the `.app` bundle is replaced the same way.
   4. Starts the new version with the same arguments and exits. The new version removes the `.old` backup after the previous process has exited.
 - If installation fails, the original files are restored and a notification links you to the manual download.
-- New option in **Settings → Startup & Updates**: **Automatically download, verify, install and restart when an update is found**. It is off by default. When enabled, the background check (every 2 hours) installs new versions without asking.
+- New option in **Settings → Startup & Updates**: **Automatically download, verify, install and restart when an update is found**. It is on by default, so the background check (at startup and every 2 hours) installs new versions without asking. Turn it off to be notified and install from the tray menu instead.
 - **Check for updates** in the settings window points you to the tray menu, because the tray process owns the running executable and performs the replacement.
 - Automatic installation is not available when running from source, when the app folder is not writable (such as `Program Files`), when macOS runs the app from a temporary read-only location, or when no package exists for your platform (macOS packages are currently built for Apple Silicon only). In these cases the tray menu opens the download page instead.
 
