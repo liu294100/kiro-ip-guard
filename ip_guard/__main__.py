@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import logging
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from .autostart import install_autostart, remove_autostart
 from .core import GuardService, default_config_dir
 from .i18n import translate
+from .logs import DailyLogHandler
 from .resources import set_windows_app_id
 
 
@@ -24,13 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def configure_logging(config_dir: Path) -> None:
-    config_dir.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
-        config_dir / "kiro-ip-guard.log",
-        maxBytes=1_000_000,
-        backupCount=3,
-        encoding="utf-8",
-    )
+    # Daily files, kept for 7 days and capped at 30 MB in total; legacy
+    # kiro-ip-guard.log* files from older versions are removed automatically.
+    handler = DailyLogHandler(config_dir)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     root = logging.getLogger("kiro_ip_guard")
     root.setLevel(logging.INFO)

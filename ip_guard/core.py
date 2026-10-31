@@ -37,6 +37,8 @@ DEFAULT_GEO_PROVIDERS = (
     "https://ip.net.coffee/api/geoip/{ip}",
 )
 
+_REPEAT_LOG_SECONDS = 10 * 60
+
 POLICY_MODES = {"allowlist", "blocklist", "combined"}
 NETWORK_MODES = {"auto", "direct", "system_proxy"}
 DEFAULT_CLASH_PROCESS_NAMES = (
@@ -110,6 +112,7 @@ class GuardConfig:
     ip_query_network_mode: str = "auto"
     language: str = "auto"
     check_updates: bool = True
+    auto_install_updates: bool = False
     check_interval_seconds: int = 1
     cache_ttl_seconds: int = 600
     request_timeout_seconds: int = 8
@@ -157,6 +160,7 @@ class GuardConfig:
         if self.language not in SUPPORTED_LANGUAGES:
             raise ValueError("language must be auto, zh-CN, or en")
         self.check_updates = bool(self.check_updates)
+        self.auto_install_updates = bool(self.auto_install_updates)
         self.check_interval_seconds = max(1, int(self.check_interval_seconds))
         self.cache_ttl_seconds = max(0, int(self.cache_ttl_seconds))
         self.request_timeout_seconds = max(1, int(self.request_timeout_seconds))
@@ -767,6 +771,8 @@ class GuardService:
         self._wake_event = threading.Event()
         self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
+        self._last_logged_key: tuple[Optional[bool], str] | None = None
+        self._last_logged_at = 0.0
         self.config = load_config(config_path)
         self._config_mtime_ns = self._get_config_mtime_ns()
         self.last_result = CheckResult(None, translate(self.config.language, "尚未检查"))
@@ -948,10 +954,17 @@ class GuardService:
 
     def _publish(self, result: CheckResult) -> None:
         self.last_result = result
-        if result.compliant is False:
-            LOG.error(result.message)
-        else:
-            LOG.info(result.message)
+        # Checks run every second by default. Log a result when it changes and
+        # repeat an unchanged result only periodically, so logs stay small.
+        key = (result.compliant, result.message)
+        now = time.monotonic()
+        if key != self._last_logged_key or now - self._last_logged_at >= _REPEAT_LOG_SECONDS:
+            self._last_logged_key = key
+            self._last_logged_at = now
+            if result.compliant is False:
+                LOG.error(result.message)
+            else:
+                LOG.info(result.message)
         if self.on_result:
             try:
                 self.on_result(result)

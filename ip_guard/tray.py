@@ -16,7 +16,14 @@ from . import __version__
 from .core import CheckResult, GuardService
 from .i18n import translate
 from .resources import icon_path
-from .update import ReleaseInfo, check_latest_release
+from .update import (
+    ReleaseInfo,
+    can_self_update,
+    check_latest_release,
+    cleanup_previous_install,
+    install_release,
+    launch_installed,
+)
 
 LOG = logging.getLogger("kiro_ip_guard")
 _UPDATE_INTERVAL_SECONDS = 2 * 60 * 60
@@ -30,6 +37,8 @@ class TrayApplication:
         self._update_lock = threading.Lock()
         self._update_stop_event = threading.Event()
         self._latest_release: ReleaseInfo | None = None
+        self._self_update_supported = can_self_update()
+        self._installing = False
         self.icon = pystray.Icon(
             "kiro-ip-guard",
             self._make_icon("idle"),
@@ -85,11 +94,19 @@ class TrayApplication:
             MenuItem(lambda _: self._t("检查更新…"), self._check_updates),
             MenuItem(
                 lambda _: self._t(
-                    "下载新版本 v{version}…",
+                    "安装更新 v{version}（自动重启）"
+                    if self._self_update_supported
+                    else "下载新版本 v{version}…",
                     version=self._latest_release.version if self._latest_release else "",
                 ),
-                self._open_release,
+                self._install_or_open_release,
                 visible=lambda _: self._latest_release is not None,
+                enabled=lambda _: not self._installing,
+            ),
+            MenuItem(
+                lambda _: self._t("查看更新说明…"),
+                self._open_release,
+                visible=lambda _: self._latest_release is not None and self._self_update_supported,
             ),
             Menu.SEPARATOR,
             MenuItem(lambda _: self._t("退出"), self._exit),
@@ -97,6 +114,11 @@ class TrayApplication:
 
     def run(self) -> None:
         self.service.start()
+        threading.Thread(
+            target=cleanup_previous_install,
+            name="update-cleanup",
+            daemon=True,
+        ).start()
         threading.Thread(
             target=self._automatic_update_loop,
             name="update-checker",
@@ -191,13 +213,23 @@ class TrayApplication:
             release = check_latest_release(__version__)
             self._latest_release = release
             if release is not None:
-                self._notify(
-                    self._t(
-                        "发现新版本 v{version}，可从托盘菜单打开下载页。",
-                        version=release.version,
-                    ),
-                    self._t("发现新版本"),
+                auto_install = (
+                    not manual
+                    and self._self_update_supported
+                    and self.service.config.auto_install_updates
                 )
+                if auto_install:
+                    self._start_install(release)
+                else:
+                    self._notify(
+                        self._t(
+                            "发现新版本 v{version}，可从托盘菜单一键安装更新。"
+                            if self._self_update_supported
+                            else "发现新版本 v{version}，可从托盘菜单打开下载页。",
+                            version=release.version,
+                        ),
+                        self._t("发现新版本"),
+                    )
             elif manual:
                 self._notify(
                     self._t("当前已是最新版本 v{version}", version=__version__),
@@ -218,6 +250,69 @@ class TrayApplication:
     def _open_release(self, icon: pystray.Icon, item: MenuItem) -> None:
         if self._latest_release is not None:
             webbrowser.open(self._latest_release.html_url)
+
+    def _install_or_open_release(self, icon: pystray.Icon, item: MenuItem) -> None:
+        release = self._latest_release
+        if release is None:
+            return
+        if self._self_update_supported:
+            self._start_install(release)
+        else:
+            webbrowser.open(release.html_url)
+
+    def _start_install(self, release: ReleaseInfo) -> None:
+        if self._installing:
+            return
+        self._installing = True
+        threading.Thread(
+            target=self._install_worker,
+            args=(release,),
+            name="update-installer",
+            daemon=True,
+        ).start()
+
+    def _install_worker(self, release: ReleaseInfo) -> None:
+        messages = {
+            "download": "正在下载新版本 v{version}……",
+            "verify": "正在校验新版本 v{version}……",
+            "install": "正在安装新版本 v{version}……",
+        }
+
+        def progress(stage: str) -> None:
+            text = messages.get(stage)
+            if text:
+                self._notify(self._t(text, version=release.version), "Kiro IP Guard")
+
+        try:
+            target = install_release(release, __version__, progress=progress)
+        except Exception as exc:
+            LOG.warning("Update installation failed: %s", exc)
+            self._notify(
+                self._t("自动安装更新失败：{error}。可从托盘菜单打开下载页手动更新。", error=exc),
+                "Kiro IP Guard",
+            )
+            self._installing = False
+            try:
+                self.icon.update_menu()
+            except Exception:
+                LOG.debug("Tray menu update failed", exc_info=True)
+            return
+
+        self._notify(
+            self._t("已安装 v{version}，正在重启……", version=release.version),
+            "Kiro IP Guard",
+        )
+        self._update_stop_event.set()
+        self.service.stop()
+        try:
+            launch_installed(target)
+        except Exception as exc:
+            LOG.warning("Could not start the updated build: %s", exc)
+            self._notify(
+                self._t("新版本已安装，但无法自动启动：{error}。请手动重新打开程序。", error=exc),
+                "Kiro IP Guard",
+            )
+        self.icon.stop()
 
     def _on_result(self, result: CheckResult) -> None:
         state = "idle" if result.compliant is None else ("ok" if result.compliant else "blocked")

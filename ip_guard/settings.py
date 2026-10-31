@@ -28,7 +28,7 @@ from .core import (
 )
 from .resources import apply_tk_window_icon
 from .i18n import SUPPORTED_LANGUAGES, translate
-from .update import ReleaseInfo, check_latest_release
+from .update import ReleaseInfo, can_self_update, check_latest_release
 
 COUNTRY_CODE_PATTERN = re.compile(r"^[A-Za-z]{2}$")
 
@@ -173,6 +173,7 @@ def config_from_form(values: Mapping[str, object]) -> GuardConfig:
         ip_query_network_mode=network_mode,
         language=language,
         check_updates=_as_bool(values.get("check_updates", True)),
+        auto_install_updates=_as_bool(values.get("auto_install_updates", False)),
         check_interval_seconds=interval,
         cache_ttl_seconds=cache_ttl,
         request_timeout_seconds=timeout,
@@ -203,6 +204,7 @@ class SettingsWindow:
             "ip_query_network_mode": tk.StringVar(),
             "language": tk.StringVar(),
             "check_updates": tk.BooleanVar(),
+            "auto_install_updates": tk.BooleanVar(),
             "check_interval_seconds": tk.StringVar(),
             "cache_ttl_seconds": tk.StringVar(),
             "request_timeout_seconds": tk.StringVar(),
@@ -470,6 +472,11 @@ class SettingsWindow:
             text=self._t("启动后自动检查 GitHub Releases；持续运行时每 2 小时检查一次"),
             variable=self.vars["check_updates"],
         ).pack(anchor="w")
+        ttk.Checkbutton(
+            update_frame,
+            text=self._t("发现新版本时自动下载、校验并安装，然后重启（仅打包版）"),
+            variable=self.vars["auto_install_updates"],
+        ).pack(anchor="w", pady=(6, 0))
         update_actions = ttk.Frame(update_frame)
         update_actions.pack(fill="x", pady=(10, 0))
         ttk.Button(
@@ -518,7 +525,18 @@ class SettingsWindow:
             self.update_status.set(self._t("当前已是最新版本 v{version}。", version=__version__))
             return
         self.update_status.set(self._t("发现新版本 v{version}。", version=release.version))
-        if messagebox.askyesno(
+        if can_self_update():
+            # The tray process owns the running executable, so it performs the
+            # replacement and restart; this window only points the user there.
+            messagebox.showinfo(
+                self._t("发现新版本"),
+                self._t(
+                    "发现新版本 v{version}。请在托盘菜单点击“安装更新 v{version}”，程序会自动下载、替换并重启。",
+                    version=release.version,
+                ),
+                parent=self.root,
+            )
+        elif messagebox.askyesno(
             self._t("发现新版本"),
             self._t("发现新版本 v{version}。是否打开 GitHub Release 下载页？", version=release.version),
             parent=self.root,
