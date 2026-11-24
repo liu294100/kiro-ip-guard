@@ -139,6 +139,14 @@ python3 -m venv .venv
 | `claude_route_checks_enabled` | `true` | 自动检测 Claude 与 Anthropic 域名的实际出口 |
 | `providers` | SKK、ipwho.is、ipapi.co、Claude、Anthropic | 每次检查并发获取当前公网出口 IP |
 | `geo_providers` | Net.Coffee | 为每个出口补充地区，URL 中用 `{ip}` 占位 |
+| `stun_enabled` | `false` | STUN 出口是否参与策略判断；开启后 STUN 出口不合规也会终止 Kiro，全部 STUN 服务器失败按“无法确认”处理 |
+| `stun_servers` | `["stun.cloudflare.com:3478"]` | 可选的 STUN 服务器列表，`host:port`，默认端口 3478 |
+| `stun_active_servers` | `["stun.cloudflare.com:3478"]` | 实际生效的服务器（`stun_servers` 的子集，可多选，每个单独检测） |
+| `stun_socks_proxy` | `""` | 代理模式下 STUN 使用的 SOCKS5 端点；留空时自动选择：先试系统代理端口，再试检测到的代理工具在 `clash_proxy_ports` 上监听的端口，用第一个支持 SOCKS5 UDP 的 |
+
+STUN 线路与 `ip_query_network_mode` 的实际结果一致：系统代理启用时，通过代理的 SOCKS5 UDP 转发发送请求（代理按 STUN
+域名套用分流规则）；否则直接发送 UDP，TUN 规则仍生效。STUN 只反映访问该 STUN 服务器时的线路，不一定等于 Kiro 访问
+AWS/Anthropic 的线路，因此默认关闭，仅在“检测结果”页显示。
 
 默认黑名单使用 `CN`、`HK`、`MO`、`RU`、`IR`、`KP`、`SY`、`CU`。官方页面给出了支持列表而不是完整的
 “受制裁地区黑名单”，因此程序没有猜测“其他地区”。如政策更新，请显式增删 ISO 代码。

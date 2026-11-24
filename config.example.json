@@ -87,5 +87,13 @@
   ],
   "geo_providers": [
     "https://ip.net.coffee/api/geoip/{ip}"
-  ]
+  ],
+  "stun_enabled": false,
+  "stun_servers": [
+    "stun.cloudflare.com:3478"
+  ],
+  "stun_active_servers": [
+    "stun.cloudflare.com:3478"
+  ],
+  "stun_socks_proxy": ""
 }

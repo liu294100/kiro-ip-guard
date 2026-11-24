@@ -15,12 +15,14 @@ from urllib.parse import urlparse
 from . import __version__
 from .autostart import install_autostart, is_autostart_installed, remove_autostart
 from .core import (
+    DEFAULT_STUN_SERVERS,
     ClashDetector,
     GeoLookup,
     GEO_LOOKUP_MODES,
     GuardConfig,
     IpInfo,
     NETWORK_MODES,
+    StunObservation,
     POLICY_MODES,
     evaluate_policy,
     get_system_proxies,
@@ -29,6 +31,7 @@ from .core import (
     save_config,
 )
 from .geoip_db import validate_database
+from .stun import normalize_stun_server, parse_socks_proxy
 from .resources import apply_tk_window_icon
 from .i18n import SUPPORTED_LANGUAGES, translate
 from .update import ReleaseInfo, can_self_update, check_latest_release
@@ -176,6 +179,31 @@ def config_from_form(values: Mapping[str, object]) -> GuardConfig:
         if "{ip}" not in url:
             raise ValueError(text("GeoIP 查询源必须包含 {ip} 占位符: {url}", ip="{ip}", url=url))
 
+    raw_stun_servers = values.get("stun_servers")
+    stun_servers = (
+        _split_values(raw_stun_servers) if raw_stun_servers is not None else list(DEFAULT_STUN_SERVERS)
+    )
+    if not stun_servers:
+        raise ValueError(text("至少需要填写一个 STUN 服务器"))
+    raw_stun_active = values.get("stun_active_servers")
+    try:
+        stun_servers = list(dict.fromkeys(normalize_stun_server(item) for item in stun_servers))
+        if raw_stun_active is None:
+            stun_active = [s for s in DEFAULT_STUN_SERVERS if s in stun_servers] or stun_servers[:1]
+        else:
+            stun_active = [normalize_stun_server(item) for item in _split_values(raw_stun_active)]
+    except ValueError as exc:
+        raise ValueError(text("STUN 服务器地址无效: {error}", error=exc)) from exc
+    stun_active = [item for item in stun_active if item in stun_servers]
+    if not stun_active:
+        raise ValueError(text("至少选择一个生效的 STUN 服务器"))
+    stun_socks_proxy = str(values.get("stun_socks_proxy", "") or "").strip()
+    if stun_socks_proxy:
+        try:
+            parse_socks_proxy(stun_socks_proxy)
+        except ValueError as exc:
+            raise ValueError(text("SOCKS5 代理地址无效: {error}", error=exc)) from exc
+
     return GuardConfig(
         enabled=_as_bool(values.get("enabled")),
         policy_mode=policy_mode,
@@ -199,6 +227,10 @@ def config_from_form(values: Mapping[str, object]) -> GuardConfig:
         claude_route_checks_enabled=_as_bool(values.get("claude_route_checks_enabled")),
         providers=providers,
         geo_providers=geo_providers,
+        stun_enabled=_as_bool(values.get("stun_enabled", False)),
+        stun_servers=stun_servers,
+        stun_active_servers=stun_active,
+        stun_socks_proxy=stun_socks_proxy,
     ).normalized()
 
 
@@ -217,6 +249,8 @@ class SettingsWindow:
             "ip_query_network_mode": tk.StringVar(),
             "geo_lookup_mode": tk.StringVar(),
             "geoip_db_path": tk.StringVar(),
+            "stun_enabled": tk.BooleanVar(),
+            "stun_socks_proxy": tk.StringVar(),
             "language": tk.StringVar(),
             "check_updates": tk.BooleanVar(),
             "auto_install_updates": tk.BooleanVar(),
@@ -609,7 +643,7 @@ class SettingsWindow:
             self._t("常用监听端口"),
             "clash_proxy_ports",
             3,
-            self._t("仅用于诊断，不再作为代理已启用的依据"),
+            self._t("用于诊断和查找 STUN 的 SOCKS5 端口；不作为代理已启用的依据"),
         )
         self._text(
             parent,
@@ -628,6 +662,83 @@ class SettingsWindow:
             self._t("每行一个，必须包含 {ip} 占位符", ip="{ip}"),
         )
         self._build_geo_lookup_frame(parent, 7)
+        self._build_stun_frame(parent, 8)
+
+    def _build_stun_frame(self, parent: ttk.Frame, row: int) -> None:
+        frame = ttk.LabelFrame(parent, text=self._t("STUN 出口检测"), padding=8)
+        frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            frame,
+            text=self._t("STUN 出口参与策略判断（默认关闭；开启后 STUN 出口不合规也会终止 Kiro）"),
+            variable=self.vars["stun_enabled"],
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            frame,
+            text=self._t(
+                "与原有检查共用同一套代理检测（上方“代理工具进程名”“常用监听端口”和“要求系统代理或 TUN/VPN 已实际启用”）：系统代理启用时经代理的 SOCKS5 UDP 转发，否则直接发送 UDP（TUN 规则仍生效）。关闭时“检测结果”页仍会显示 STUN 结果，仅供诊断。"
+            ),
+            wraplength=760,
+            foreground="#666666",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 4))
+        self._text(
+            frame,
+            2,
+            self._t("STUN 服务器"),
+            "stun_servers",
+            3,
+            self._t("每行一个，格式 host:port（默认端口 3478）"),
+        )
+        ttk.Label(frame, text=self._t("生效的服务器")).grid(
+            row=3, column=0, sticky="nw", padx=(0, 12), pady=6
+        )
+        box = ttk.Frame(frame)
+        box.grid(row=3, column=1, sticky="ew", pady=6)
+        box.columnconfigure(0, weight=1)
+        self.stun_listbox = tk.Listbox(
+            box, selectmode="multiple", height=4, exportselection=False, activestyle="none"
+        )
+        self.stun_listbox.grid(row=0, column=0, sticky="ew")
+        ttk.Label(
+            box,
+            text=self._t("点击选中或取消；可同时选中多个，每个都会单独检测"),
+            foreground="#666666",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self._entry(
+            frame,
+            4,
+            self._t("SOCKS5 代理（可选）"),
+            "stun_socks_proxy",
+            self._t(
+                "留空时自动选择：依次尝试系统代理端口和检测到的代理工具在“常用监听端口”上的端口，使用第一个支持 SOCKS5 UDP 的端口"
+            ),
+        )
+        servers_text = self.text_fields["stun_servers"]
+        servers_text.bind("<KeyRelease>", lambda _event: self._sync_stun_listbox())
+        servers_text.bind("<FocusOut>", lambda _event: self._sync_stun_listbox())
+
+    def _selected_stun_servers(self) -> list[str]:
+        return [self.stun_listbox.get(index) for index in self.stun_listbox.curselection()]
+
+    def _sync_stun_listbox(self, selected: list[str] | None = None) -> None:
+        """Rebuild the active-server list from the text box, keeping selections."""
+        servers: list[str] = []
+        for item in _split_values(self.text_fields["stun_servers"].get("1.0", "end")):
+            try:
+                name = normalize_stun_server(item)
+            except ValueError:
+                continue  # Reported when saving.
+            if name not in servers:
+                servers.append(name)
+        wanted = set(self._selected_stun_servers() if selected is None else selected)
+        if list(self.stun_listbox.get(0, "end")) != servers:
+            self.stun_listbox.delete(0, "end")
+            for name in servers:
+                self.stun_listbox.insert("end", name)
+        self.stun_listbox.selection_clear(0, "end")
+        for index, name in enumerate(servers):
+            if name in wanted:
+                self.stun_listbox.selection_set(index)
 
     def _build_geo_lookup_frame(self, parent: ttk.Frame, row: int) -> None:
         frame = ttk.LabelFrame(parent, text=self._t("国家/地区判断方式"), padding=8)
@@ -778,10 +889,11 @@ class SettingsWindow:
             parent, textvariable=self.geoip_result_status, foreground="#555555", wraplength=800
         ).pack(anchor="w", pady=(0, 8))
 
-        columns = ("source", "ip", "source_country", "geo_country", "geo_source", "state")
+        columns = ("source", "method", "ip", "source_country", "geo_country", "geo_source", "state")
         self.result_tree = ttk.Treeview(parent, columns=columns, show="headings", height=12)
         headings = {
             "source": self._t("查询路径"),
+            "method": self._t("获取方式"),
             "ip": self._t("本机公网出口 IP"),
             "source_country": self._t("查询源地区"),
             "geo_country": self._t("GeoIP 地区"),
@@ -789,12 +901,13 @@ class SettingsWindow:
             "state": self._t("策略结果"),
         }
         widths = {
-            "source": 160,
-            "ip": 140,
-            "source_country": 80,
-            "geo_country": 80,
-            "geo_source": 200,
-            "state": 80,
+            "source": 150,
+            "method": 150,
+            "ip": 120,
+            "source_country": 70,
+            "geo_country": 70,
+            "geo_source": 170,
+            "state": 90,
         }
         for column in columns:
             self.result_tree.heading(column, text=headings[column])
@@ -859,10 +972,13 @@ class SettingsWindow:
         for key, text in self.text_fields.items():
             text.delete("1.0", "end")
             text.insert("1.0", "\n".join(str(value) for value in values[key]))
+        self._sync_stun_listbox(list(values["stun_active_servers"]))
 
     def _form_values(self) -> dict[str, object]:
         values = {key: variable.get() for key, variable in self.vars.items()}
         values.update({key: text.get("1.0", "end").strip() for key, text in self.text_fields.items()})
+        self._sync_stun_listbox()
+        values["stun_active_servers"] = "\n".join(self._selected_stun_servers())
         return values
 
     def _read_config(self) -> GuardConfig:
@@ -902,7 +1018,7 @@ class SettingsWindow:
         self.last_checked.set(self._t("检测中……"))
 
         def worker() -> None:
-            rows: list[tuple[str, ...]] = []
+            rows: list[tuple[tuple[str, ...], str]] = []
             if config.geo_lookup_mode == "local":
                 geoip_summary = self._t(
                     "GeoIP：本地库优先；{status}",
@@ -932,37 +1048,84 @@ class SettingsWindow:
                 reason=clash_status.reason,
                 summary=network_summary,
             )
+            compliant_state = self._t("合规")
+            blocked_state = self._t("不合规")
+            unknown_state = self._t("无法确认")
+
+            def state_of(info: IpInfo) -> str:
+                policy = evaluate_policy(info, config)
+                if not policy.compliant or (config.clash_required and clash_status.active is False):
+                    return blocked_state
+                if config.clash_required and clash_status.active is None:
+                    return unknown_state
+                return compliant_state
+
+            counted: list[str] = []
+            http_method = (
+                self._t("HTTPS 直连")
+                if effective_network_mode == "direct"
+                else self._t("HTTPS 系统代理")
+            )
+            http_error: Exception | None = None
             try:
-                infos = self.geo_lookup.lookup_all(config, force_refresh=True)
-                for info in infos:
-                    policy = evaluate_policy(info, config)
-                    if not policy.compliant or (config.clash_required and clash_status.active is False):
-                        state = self._t("不合规")
-                    elif config.clash_required and clash_status.active is None:
-                        state = self._t("无法确认")
-                    else:
-                        state = self._t("合规")
-                    rows.append(self._result_row(info, state))
-                blocked_state = self._t("不合规")
-                unknown_state = self._t("无法确认")
-                failed = sum(1 for row in rows if row[-1] == blocked_state)
-                unknown = sum(1 for row in rows if row[-1] == unknown_state)
+                for info in self.geo_lookup.lookup_all(config, force_refresh=True):
+                    state = state_of(info)
+                    counted.append(state)
+                    rows.append((self._result_row(info, http_method, state), state))
+            except Exception as exc:
+                http_error = exc
+
+            # STUN is always shown here for diagnosis; it only counts when enabled.
+            try:
+                observations = self.geo_lookup.lookup_stun(
+                    config, force_refresh=True, clash_status=clash_status
+                )
+            except Exception as exc:
+                observations = (StunObservation("-", error=str(exc)),)
+            for observation in observations:
+                if observation.via:
+                    method = self._t("STUN 经 SOCKS5 {via}", via=observation.via)
+                    if observation.via_source:
+                        method += self._t("（{source}）", source=observation.via_source)
+                else:
+                    method = self._t("STUN UDP 直连")
+                if observation.ok and observation.info is not None:
+                    state = state_of(observation.info)
+                    tag = state
+                    if not config.stun_enabled:
+                        state = self._t("{state}（仅显示）", state=state)
+                    rows.append((self._result_row(observation.info, method, state), tag))
+                else:
+                    tag = unknown_state
+                    ip = observation.info.ip if observation.info is not None else "-"
+                    values = (observation.server, method, ip, "-", "-", observation.error, self._t("失败"))
+                    rows.append((values, tag))
+                if config.stun_enabled:
+                    counted.append(tag)
+
+            if http_error is not None:
+                message = self._t("测试失败：{error}", error=http_error)
+            else:
                 message = self._t(
                     "检测完成：{count} 个路径，{failed} 个不合规，{unknown} 个无法确认。",
-                    count=len(rows),
-                    failed=failed,
-                    unknown=unknown,
+                    count=len(counted),
+                    failed=counted.count(blocked_state),
+                    unknown=counted.count(unknown_state),
                 )
                 mismatched = sorted(
-                    {row[1] for row in rows if row[2] != "-" and row[3] != "-" and row[2] != row[3]}
+                    {
+                        values[2]
+                        for values, _ in rows
+                        if values[3] != "-" and values[4] != "-" and values[3] != values[4]
+                    }
                 )
                 if mismatched:
                     message += " " + self._t(
                         "以下 IP 的查询源地区与 GeoIP 地区不一致，策略以 GeoIP 为准：{ips}",
                         ips=", ".join(mismatched),
                     )
-            except Exception as exc:
-                message = self._t("测试失败：{error}", error=exc)
+            if not config.stun_enabled and observations:
+                message += " " + self._t("STUN 结果仅显示，未参与策略判断。")
             try:
                 self.root.after(
                     0, lambda: self._finish_test(message, rows, proxy_summary, geoip_summary)
@@ -972,8 +1135,8 @@ class SettingsWindow:
 
         threading.Thread(target=worker, name="settings-ip-test", daemon=True).start()
 
-    def _result_row(self, info: IpInfo, state: str) -> tuple[str, ...]:
-        """Columns: IP source, IP, source region, GeoIP region, GeoIP source, policy state."""
+    def _result_row(self, info: IpInfo, method: str, state: str) -> tuple[str, ...]:
+        """Columns: source, method, IP, source region, GeoIP region, GeoIP source, state."""
         source_url = info.source_provider or info.provider
         source = urlparse(source_url).netloc or source_url
         if info.geo_provider:
@@ -990,12 +1153,12 @@ class SettingsWindow:
             source_country = info.country_code
             geo_country = "-"
             geo_source = self._t("未获取（使用查询源地区）")
-        return (source, info.ip, source_country, geo_country, geo_source, state)
+        return (source, method, info.ip, source_country, geo_country, geo_source, state)
 
     def _finish_test(
         self,
         message: str,
-        rows: list[tuple[str, ...]],
+        rows: list[tuple[tuple[str, ...], str]],
         proxy_summary: str,
         geoip_summary: str = "",
     ) -> None:
@@ -1009,8 +1172,8 @@ class SettingsWindow:
         )
         for item in self.result_tree.get_children():
             self.result_tree.delete(item)
-        for row in rows:
-            self.result_tree.insert("", "end", values=row, tags=(row[-1],))
+        for values, tag in rows:
+            self.result_tree.insert("", "end", values=values, tags=(tag,))
         self.result_tree.tag_configure(self._t("合规"), foreground="#15803d")
         self.result_tree.tag_configure(self._t("不合规"), foreground="#b91c1c")
         self.result_tree.tag_configure(self._t("无法确认"), foreground="#b45309")

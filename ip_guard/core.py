@@ -20,6 +20,14 @@ import psutil
 
 from .geoip_db import LocalGeoDatabase
 from .i18n import SUPPORTED_LANGUAGES, effective_language, translate
+from .stun import (
+    format_host_port,
+    normalize_stun_server,
+    parse_socks_proxy,
+    parse_stun_server,
+    probe_socks5_udp,
+    stun_binding,
+)
 
 LOG = logging.getLogger("kiro_ip_guard")
 
@@ -37,6 +45,8 @@ CLAUDE_ROUTE_PROVIDERS = (
 DEFAULT_GEO_PROVIDERS = (
     "https://ip.net.coffee/api/geoip/{ip}",
 )
+
+DEFAULT_STUN_SERVERS = ("stun.cloudflare.com:3478",)
 
 _REPEAT_LOG_SECONDS = 10 * 60
 
@@ -140,6 +150,13 @@ class GuardConfig:
     claude_route_checks_enabled: bool = True
     providers: list[str] = field(default_factory=lambda: list(DEFAULT_PROVIDERS))
     geo_providers: list[str] = field(default_factory=lambda: list(DEFAULT_GEO_PROVIDERS))
+    # STUN egress checks are off by default. When enabled, every active server
+    # is queried and its mapped address must also satisfy the IP policy.
+    stun_enabled: bool = False
+    stun_servers: list[str] = field(default_factory=lambda: list(DEFAULT_STUN_SERVERS))
+    stun_active_servers: list[str] = field(default_factory=lambda: list(DEFAULT_STUN_SERVERS))
+    # Optional SOCKS5 endpoint for STUN in proxy mode; blank uses the system proxy port.
+    stun_socks_proxy: str = ""
 
     def normalized(self) -> "GuardConfig":
         self.config_version = max(2, int(self.config_version))
@@ -214,6 +231,26 @@ class GuardConfig:
             ]
         if not self.providers:
             self.providers = list(DEFAULT_PROVIDERS)
+        self.stun_enabled = bool(self.stun_enabled)
+        try:
+            servers = [normalize_stun_server(v) for v in self.stun_servers if str(v).strip()]
+            active = [normalize_stun_server(v) for v in self.stun_active_servers if str(v).strip()]
+        except ValueError as exc:
+            raise ValueError(
+                translate(self.language, "STUN 服务器地址无效: {error}", error=exc)
+            ) from exc
+        self.stun_servers = list(dict.fromkeys(servers)) or list(DEFAULT_STUN_SERVERS)
+        self.stun_active_servers = [
+            server for server in dict.fromkeys(active) if server in self.stun_servers
+        ] or [self.stun_servers[0]]
+        self.stun_socks_proxy = str(self.stun_socks_proxy or "").strip()
+        if self.stun_socks_proxy:
+            try:
+                parse_socks_proxy(self.stun_socks_proxy)
+            except ValueError as exc:
+                raise ValueError(
+                    translate(self.language, "SOCKS5 代理地址无效: {error}", error=exc)
+                ) from exc
         return self
 
 
@@ -247,12 +284,28 @@ class ClashStatus:
 
 
 @dataclass(frozen=True)
+class StunObservation:
+    server: str
+    # SOCKS5 endpoint the request went through; empty for direct UDP.
+    via: str = ""
+    info: Optional[IpInfo] = None
+    error: str = ""
+    # Where the SOCKS5 endpoint came from (manual, system proxy, tool port).
+    via_source: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.info is not None and bool(self.info.country_code) and not self.error
+
+
+@dataclass(frozen=True)
 class CheckResult:
     compliant: Optional[bool]
     message: str
     ip_info: Optional[IpInfo] = None
     terminated_pids: tuple[int, ...] = ()
     clash_status: Optional[ClashStatus] = None
+    stun_observations: tuple[StunObservation, ...] = ()
 
 
 def get_system_proxies() -> dict[str, str]:
@@ -271,6 +324,46 @@ def resolve_ip_query_network_mode(config: GuardConfig, clash_status: ClashStatus
     # A system proxy must use ProxyHandler. TUN/VPN routing is below HTTP and
     # still applies while direct mode explicitly ignores stale HTTP proxy data.
     return "system_proxy" if clash_status.proxy_endpoints else "direct"
+
+
+def stun_socks_candidates(
+    config: GuardConfig,
+    clash_status: Optional[ClashStatus] = None,
+) -> list[tuple[tuple[str, int], str]]:
+    """Candidate SOCKS5 endpoints for STUN, in priority order, with their origin.
+
+    Order: manual value; system proxy (SOCKS entry first, then HTTP, because
+    Clash/mihomo mixed ports accept SOCKS5 too); then ports on the configured
+    common-port list that detected proxy tools are listening on (for example
+    v2rayN 10808 when the system proxy points at its HTTP port 10809).
+    """
+    language = config.language
+    if config.stun_socks_proxy:
+        return [(parse_socks_proxy(config.stun_socks_proxy), translate(language, "手动指定"))]
+    candidates: list[tuple[tuple[str, int], str]] = []
+
+    def add(host: str, port: int, origin: str) -> None:
+        endpoint = (host, port)
+        if all(existing != endpoint for existing, _ in candidates):
+            candidates.append((endpoint, origin))
+
+    proxies = {key.lower(): value for key, value in get_system_proxies().items()}
+    for scheme in ("socks5", "socks", "https", "http", "all"):
+        value = str(proxies.get(scheme) or "").strip()
+        if not value:
+            continue
+        parsed = urlparse(value if "://" in value else f"http://{value}")
+        try:
+            if parsed.hostname and parsed.port:
+                add(parsed.hostname, parsed.port, translate(language, "系统代理"))
+        except ValueError:
+            continue
+    if clash_status is not None:
+        for endpoint in clash_status.listening_endpoints:
+            host, _, port_text = endpoint.rpartition(":")
+            if host and port_text.isdigit():
+                add(host, int(port_text), translate(language, "代理工具监听端口"))
+    return candidates
 
 
 def _normalize_codes(values: Iterable[str]) -> list[str]:
@@ -377,6 +470,7 @@ class GeoLookup:
         self._cache_lock = threading.RLock()
         self._geo_refresh_lock = threading.Lock()
         self._geo_cache: dict[tuple[object, ...], tuple[float, IpInfo]] = {}
+        self._stun_socks_endpoint: Optional[tuple[str, int]] = None
         # Downloads follow the OS proxy when one is set; TUN routes apply either way.
         self.local_db = LocalGeoDatabase(
             data_dir or default_config_dir(),
@@ -394,8 +488,120 @@ class GeoLookup:
         # The current public IP is intentionally never cached. Every policy check
         # asks every configured IP provider again so an egress change is detected.
         raw_results = self._query_current_ips(config)
-        unique_ips = list(dict.fromkeys(info.ip for info in raw_results))
+        geo_by_ip = self._geolocate([info.ip for info in raw_results], config, force_refresh)
+        return tuple(self._merge_geo(info, geo_by_ip.get(info.ip)) for info in raw_results)
 
+    def lookup_stun(
+        self,
+        config: GuardConfig,
+        force_refresh: bool = False,
+        clash_status: Optional[ClashStatus] = None,
+    ) -> tuple[StunObservation, ...]:
+        """Query every active STUN server and geolocate the mapped addresses.
+
+        The route follows the effective network mode, exactly like the HTTPS
+        checks: proxy mode uses a SOCKS5 UDP relay chosen from the system proxy
+        and the detected proxy tools' listening ports; direct mode sends plain
+        UDP (TUN rules still apply). Mapped addresses are never cached.
+        """
+        servers = list(config.stun_active_servers)
+        via: Optional[tuple[str, int]] = None
+        via_source = ""
+        if config.ip_query_network_mode == "system_proxy":
+            try:
+                via, via_source = self._select_stun_socks(config, clash_status)
+            except ValueError as exc:
+                return tuple(StunObservation(server, error=str(exc)) for server in servers)
+        via_text = format_host_port(*via) if via else ""
+
+        def query(server: str) -> StunObservation:
+            try:
+                host, port = parse_stun_server(server)
+                ip = stun_binding(host, port, config.request_timeout_seconds, via)
+                if not ipaddress.ip_address(ip).is_global:
+                    raise ValueError(translate(config.language, "STUN 返回非公网 IP: {ip}", ip=ip))
+            except Exception as exc:
+                LOG.debug("STUN 查询失败 %s: %s", server, exc)
+                return StunObservation(
+                    server, via_text, error=str(exc) or type(exc).__name__, via_source=via_source
+                )
+            return StunObservation(
+                server, via_text, IpInfo(ip, "", provider=f"stun://{server}"), via_source=via_source
+            )
+
+        if not servers:
+            return ()
+        with ThreadPoolExecutor(max_workers=min(len(servers), 8), thread_name_prefix="stun") as executor:
+            raw = list(executor.map(query, servers))
+
+        found = [item.info.ip for item in raw if item.info is not None]
+        geo_by_ip = self._geolocate(found, config, force_refresh) if found else {}
+        observations: list[StunObservation] = []
+        for item in raw:
+            if item.info is None:
+                observations.append(item)
+                continue
+            geo = geo_by_ip.get(item.info.ip)
+            if geo is None:
+                observations.append(
+                    StunObservation(
+                        item.server,
+                        item.via,
+                        item.info,
+                        translate(config.language, "无法确定 IP {ip} 的国家/地区", ip=item.info.ip),
+                        via_source=item.via_source,
+                    )
+                )
+                continue
+            observations.append(
+                StunObservation(
+                    item.server,
+                    item.via,
+                    IpInfo(
+                        ip=item.info.ip,
+                        country_code=geo.country_code,
+                        country_name=geo.country_name,
+                        provider=f"{item.info.provider} + {geo.provider}",
+                        source_provider=item.info.provider,
+                        geo_provider=geo.provider,
+                    ),
+                    via_source=item.via_source,
+                )
+            )
+        return tuple(observations)
+
+    def _select_stun_socks(
+        self,
+        config: GuardConfig,
+        clash_status: Optional[ClashStatus],
+    ) -> tuple[tuple[str, int], str]:
+        candidates = stun_socks_candidates(config, clash_status)
+        if not candidates:
+            raise ValueError(translate(config.language, "未找到可用于 STUN 的代理端点"))
+        if config.stun_socks_proxy:
+            return candidates[0]  # A manual endpoint is used as-is; errors surface per server.
+        # Try the endpoint that worked last time first, so the 1-second loop
+        # usually needs a single local probe.
+        last = self._stun_socks_endpoint
+        for endpoint, origin in sorted(candidates, key=lambda item: item[0] != last):
+            if probe_socks5_udp(endpoint):
+                self._stun_socks_endpoint = endpoint
+                return endpoint, origin
+        raise ValueError(
+            translate(
+                config.language,
+                "未找到支持 SOCKS5 UDP 的代理端口（已尝试 {endpoints}）",
+                endpoints=", ".join(format_host_port(*endpoint) for endpoint, _ in candidates),
+            )
+        )
+
+    def _geolocate(
+        self,
+        ips: Iterable[str],
+        config: GuardConfig,
+        force_refresh: bool,
+    ) -> dict[str, IpInfo | None]:
+        unique_ips = list(dict.fromkeys(ips))
         geo_by_ip: dict[str, IpInfo | None] = {}
         if config.geo_lookup_mode == "local":
             # A local lookup takes microseconds, so it needs no cache and
@@ -413,8 +619,7 @@ class GeoLookup:
                 }
                 for future in as_completed(futures):
                     geo_by_ip[futures[future]] = future.result()
-
-        return tuple(self._merge_geo(info, geo_by_ip.get(info.ip)) for info in raw_results)
+        return geo_by_ip
 
     def _lookup_local_geo(self, ip: str, config: GuardConfig) -> IpInfo | None:
         found = self.local_db.lookup(ip, config.geoip_db_path)
@@ -884,12 +1089,38 @@ class GuardService:
             lookup_error = exc
             LOG.exception("检查公网 IP 失败")
 
-        denied = [(info, policy) for info, policy in evaluated if not policy.compliant]
+        stun_observations: tuple[StunObservation, ...] = ()
+        stun_evaluated: list[tuple[IpInfo, PolicyResult]] = []
+        stun_unknown = False
+        lookup_stun = getattr(self.lookup, "lookup_stun", None) if config.stun_enabled else None
+        if lookup_stun is not None:
+            try:
+                stun_observations = tuple(
+                    lookup_stun(config, force_refresh=force_refresh, clash_status=clash_status)
+                )
+            except Exception:
+                LOG.exception("STUN 检测失败")
+            for observation in stun_observations:
+                if not observation.ok or observation.info is None:
+                    continue
+                policy = evaluate_policy(observation.info, config)
+                stun_evaluated.append(
+                    (
+                        observation.info,
+                        PolicyResult(policy.compliant, f"STUN {observation.server}: {policy.reason}"),
+                    )
+                )
+            # Like HTTP providers, a partial failure is fine; no answer at all is unknown.
+            stun_unknown = not stun_evaluated
+
+        denied = [
+            (info, policy) for info, policy in evaluated + stun_evaluated if not policy.compliant
+        ]
         clash_denied = config.clash_required and clash_status.active is False
         clash_unknown = config.clash_required and clash_status.active is None
         if denied or clash_denied:
             compliant: Optional[bool] = False
-        elif lookup_error is not None or clash_unknown:
+        elif lookup_error is not None or clash_unknown or stun_unknown:
             compliant = None
         else:
             compliant = True
@@ -920,12 +1151,20 @@ class GuardService:
                 f"{info.country_code or '?'}@{info.ip}" for info, _ in evaluated
             )
             parts.append(translate(language, "多源观测 [{observations}]", observations=observations))
-            if denied:
-                parts.extend(policy.reason for _, policy in denied)
-                primary = denied[0][0]
-            else:
-                parts.append(translate(language, "所有已观测出口均符合 IP 策略"))
-                primary = infos[0]
+        if lookup_stun is not None:
+            stun_text = ", ".join(
+                f"{item.info.country_code}@{item.info.ip}"
+                if item.ok and item.info is not None
+                else f"{item.server}: {item.error}"
+                for item in stun_observations
+            ) or translate(language, "无结果")
+            parts.append(translate(language, "STUN 观测 [{observations}]", observations=stun_text))
+        if denied:
+            parts.extend(policy.reason for _, policy in denied)
+            primary = denied[0][0]
+        elif evaluated or stun_evaluated:
+            parts.append(translate(language, "所有已观测出口均符合 IP 策略"))
+            primary = (evaluated or stun_evaluated)[0][0]
         if lookup_error is not None:
             parts.append(translate(language, "IP 查询失败: {error}", error=lookup_error))
         if compliant is False:
@@ -948,7 +1187,14 @@ class GuardService:
         else:
             parts.append(translate(language, "代理状态与公网 IP 联合检查通过"))
         separator = "; " if effective_language(language) == "en" else "；"
-        result = CheckResult(compliant, separator.join(parts), primary, killed, clash_status)
+        result = CheckResult(
+            compliant,
+            separator.join(parts),
+            primary,
+            killed,
+            clash_status,
+            stun_observations,
+        )
         self._publish(result)
         return result
 

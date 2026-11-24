@@ -6,6 +6,11 @@
 - `geoip_db_path` can point at any GeoLite2/GeoIP2 Country compatible file, such as the `Country.mmdb` from Clash or mihomo. Custom files are never downloaded or overwritten.
 - The Providers tab is now scrollable and shows the database status, with **Choose file...**, **Restore default location**, and **Update local database** buttons. A custom path is checked when saving and must point at an existing file.
 - The Results tab shows the region reported by each IP provider and the GeoIP region side by side, plus where the GeoIP region came from (local database or online API). A summary line shows the lookup mode and database status, and IPs whose two regions differ are listed after a test.
+### STUN egress check
+- New STUN (RFC 5389) client with no extra dependencies. The route is chosen automatically: when a system proxy is active, requests go through the proxy's SOCKS5 UDP relay (Clash/mihomo mixed ports support this); otherwise they are sent as plain UDP, and TUN rules still apply. The SOCKS5 port is chosen the same way the HTTPS checks detect proxies. The app tries the system proxy port first, then the ports on the common-port list (`clash_proxy_ports`) that detected proxy tools are listening on. It uses the first port that accepts SOCKS5 UDP and remembers it for the next check. So v2rayN works even when its system proxy points at the HTTP-only port 10809. `stun_socks_proxy` sets a port manually.
+- Default server: `stun.cloudflare.com:3478`. Add more in `stun_servers` and choose any number of them as active (`stun_active_servers`). Settings → Providers shows a selectable list.
+- `stun_enabled` is off by default. When on, every active STUN egress must pass the IP policy as well. If all STUN servers fail, the status is unknown and `fail_closed` decides.
+- The Results tab has a new **Method** column (HTTPS direct, HTTPS system proxy, STUN UDP direct, or STUN via SOCKS5). It always shows the STUN rows, marked display only while STUN is off, and failed servers with their error.
 - Fixed: the region from `ip.api.skk.moe` could be read from its coordinate field `loc`. Only two-letter ISO codes are accepted now.
 - New dependency: `maxminddb`.
 

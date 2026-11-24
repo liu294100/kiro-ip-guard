@@ -10,6 +10,7 @@ Kiro IP Guard is a Windows and macOS tray application that requires an active sy
 - Combined system proxy/TUN/VPN and public-IP policy checks.
 - Concurrent public IP queries with per-IP GeoIP caching.
 - Local GeoIP database first: regions come from [Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip) `Country-without-asn.mmdb`, downloaded on first run and refreshed every 7 days. Online GeoIP providers are used only when the database is missing or has no record. Set `geo_lookup_mode` to `api` to use online providers only, or point `geoip_db_path` at another GeoLite2-compatible file such as the `Country.mmdb` used by Clash/mihomo.
+- Optional STUN egress check (off by default; `stun.cloudflare.com:3478`). STUN follows the effective network mode: through the proxy's SOCKS5 UDP relay when a system proxy is on, otherwise plain UDP. Configure several servers in `stun_servers` and choose the active ones in `stun_active_servers`. The Results tab always shows STUN rows for diagnosis.
 - Chinese, English, and system-language UI modes.
 - User-level login startup.
 - Optional GitHub Releases checks at startup and every 2 hours.
