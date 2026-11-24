@@ -223,6 +223,11 @@ class IpInfo:
     country_code: str
     country_name: str = ""
     provider: str = ""
+    # Filled when a GeoIP source overrides the region reported by the IP
+    # provider, so the results view can show both values side by side.
+    source_provider: str = ""
+    source_country_code: str = ""
+    geo_provider: str = ""
 
 
 @dataclass(frozen=True)
@@ -507,6 +512,9 @@ class GeoLookup:
             country_code=geo.country_code,
             country_name=geo.country_name or original.country_name,
             provider=f"{original.provider} + {geo.provider}",
+            source_provider=original.provider,
+            source_country_code=original.country_code,
+            geo_provider=geo.provider,
         )
 
     @staticmethod
@@ -561,12 +569,19 @@ class GeoLookup:
             raise ValueError(payload.get("message") or payload.get("reason") or "服务返回错误")
         ip = str(payload.get("ip") or expected_ip).strip()
         raw_country = str(payload.get("country") or "").strip()
-        country_code = str(
-            payload.get("country_code")
-            or payload.get("countryCode")
-            or payload.get("loc")
-            or (raw_country if len(raw_country) == 2 else "")
-        ).strip().upper()
+        # Only accept ISO alpha-2 values: some APIs (e.g. SKK) put coordinates
+        # in "loc", which Cloudflare trace uses for the country code.
+        country_code = next(
+            (
+                value
+                for value in (
+                    str(payload.get(key) or "").strip().upper()
+                    for key in ("country_code", "countryCode", "loc")
+                )
+                if len(value) == 2 and value.isalpha()
+            ),
+            raw_country.upper() if len(raw_country) == 2 and raw_country.isalpha() else "",
+        )
         country_name = str(payload.get("country_name") or (raw_country if len(raw_country) != 2 else "")).strip()
         if not ip or not country_code:
             raise ValueError("响应缺少 ip 或 country_code")

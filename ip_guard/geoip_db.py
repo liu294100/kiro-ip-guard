@@ -74,7 +74,8 @@ def _open_reader(path: Path) -> maxminddb.Reader:
     return maxminddb.open_database(str(path), maxminddb.MODE_MEMORY)
 
 
-def _validate(path: Path) -> None:
+def validate_database(path: Path) -> None:
+    """Raise if the file is not a readable country-level mmdb."""
     reader = _open_reader(path)
     try:
         database_type = str(reader.metadata().database_type)
@@ -162,7 +163,7 @@ class LocalGeoDatabase:
             for url in self.urls:
                 try:
                     self._download(opener, url, temporary)
-                    _validate(temporary)
+                    validate_database(temporary)
                     os.replace(temporary, destination)
                     self._last_error = ""
                     LOG.info("本地 GeoIP 数据库已更新: %s (来源 %s)", destination, url)

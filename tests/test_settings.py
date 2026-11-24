@@ -57,6 +57,30 @@ class SettingsValidationTests(unittest.TestCase):
         self.assertFalse(config.claude_route_checks_enabled)
         self.assertNotIn("https://claude.ai/cdn-cgi/trace", config.providers)
 
+    def test_blank_geoip_path_uses_default_location(self) -> None:
+        values = valid_form()
+        values["geoip_db_path"] = "   "
+        config = config_from_form(values)
+        self.assertEqual("local", config.geo_lookup_mode)
+        self.assertEqual("", config.geoip_db_path)
+
+    def test_existing_custom_geoip_path_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Country.mmdb"
+            path.write_bytes(b"x")
+            values = valid_form()
+            values["geoip_db_path"] = f'"{path}"'  # Windows "Copy as path" adds quotes.
+            values["geo_lookup_mode"] = "api"
+            config = config_from_form(values)
+        self.assertEqual(str(path), config.geoip_db_path)
+        self.assertEqual("api", config.geo_lookup_mode)
+
+    def test_missing_custom_geoip_path_is_rejected(self) -> None:
+        values = valid_form()
+        values["geoip_db_path"] = str(Path(tempfile.gettempdir()) / "no-such-geoip.mmdb")
+        with self.assertRaisesRegex(ValueError, "GeoIP"):
+            config_from_form(values)
+
     def test_auto_network_mode_is_accepted(self) -> None:
         values = valid_form()
         values["ip_query_network_mode"] = "auto"

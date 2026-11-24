@@ -8,7 +8,7 @@ import webbrowser
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Mapping
 from urllib.parse import urlparse
 
@@ -19,6 +19,7 @@ from .core import (
     GeoLookup,
     GEO_LOOKUP_MODES,
     GuardConfig,
+    IpInfo,
     NETWORK_MODES,
     POLICY_MODES,
     evaluate_policy,
@@ -27,6 +28,7 @@ from .core import (
     resolve_ip_query_network_mode,
     save_config,
 )
+from .geoip_db import validate_database
 from .resources import apply_tk_window_icon
 from .i18n import SUPPORTED_LANGUAGES, translate
 from .update import ReleaseInfo, can_self_update, check_latest_release
@@ -106,7 +108,9 @@ def config_from_form(values: Mapping[str, object]) -> GuardConfig:
     geo_lookup_mode = str(values.get("geo_lookup_mode", "local") or "local").strip().lower()
     if geo_lookup_mode not in GEO_LOOKUP_MODES:
         raise ValueError(text("国家/地区判断方式必须选择本地 GeoIP 数据库优先或仅在线接口"))
-    geoip_db_path = str(values.get("geoip_db_path", "") or "").strip()
+    geoip_db_path = str(values.get("geoip_db_path", "") or "").strip().strip('"')
+    if geoip_db_path and not Path(geoip_db_path).expanduser().is_file():
+        raise ValueError(text("GeoIP 数据库文件不存在: {path}", path=geoip_db_path))
 
     try:
         interval = int(str(values.get("check_interval_seconds", "")).strip())
@@ -232,6 +236,7 @@ class SettingsWindow:
         self.proxy_status = tk.StringVar(value=self._t("系统代理：尚未读取"))
         self.update_status = tk.StringVar(value=self._t("尚未检查更新"))
         self.geoip_status = tk.StringVar()
+        self.geoip_result_status = tk.StringVar(value=self._t("GeoIP：尚未检测"))
 
         root.title(f"Kiro IP Guard v{__version__} {self._t('设置')}")
         apply_tk_window_icon(root)
@@ -640,39 +645,83 @@ class SettingsWindow:
             value="api",
             variable=self.vars["geo_lookup_mode"],
         ).grid(row=1, column=0, columnspan=3, sticky="w")
-        ttk.Label(frame, text=self._t("本地数据库路径")).grid(
+        ttk.Label(frame, text=self._t("本地数据库文件")).grid(
             row=2, column=0, sticky="w", padx=(0, 12), pady=(8, 0)
         )
         ttk.Entry(frame, textvariable=self.vars["geoip_db_path"]).grid(
             row=2, column=1, sticky="ew", pady=(8, 0)
         )
-        ttk.Button(frame, text=self._t("立即更新本地库"), command=self._update_geoip_db).grid(
+        ttk.Button(frame, text=self._t("选择文件…"), command=self._choose_geoip_db).grid(
             row=2, column=2, sticky="e", padx=(8, 0), pady=(8, 0)
+        )
+        actions = ttk.Frame(frame)
+        actions.grid(row=3, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Button(actions, text=self._t("还原默认位置"), command=self._reset_geoip_db_path).pack(side="left")
+        ttk.Button(actions, text=self._t("立即更新本地库"), command=self._update_geoip_db).pack(
+            side="left", padx=(8, 0)
         )
         ttk.Label(
             frame,
             text=self._t(
-                "留空时自动下载 Loyalsoldier/geoip 的 Country-without-asn.mmdb 并每 7 天更新；也可填写 Clash/mihomo 的 Country.mmdb 等 GeoLite2 兼容文件（不会自动更新）"
+                "留空即使用默认位置：{path}。默认文件为 Loyalsoldier/geoip 的 Country-without-asn.mmdb，自动下载并每 7 天更新；也可选择 Clash/mihomo 的 Country.mmdb 等 GeoLite2 兼容文件（自定义文件不会自动更新）",
+                path=self.geo_lookup.local_db.managed_path,
             ),
             wraplength=760,
             foreground="#666666",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        ttk.Label(frame, textvariable=self.geoip_status, foreground="#555555").grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0)
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Label(frame, textvariable=self.geoip_status, foreground="#555555", wraplength=760).grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
+        self.vars["geoip_db_path"].trace_add("write", lambda *_: self._refresh_geoip_status())
 
-    def _refresh_geoip_status(self) -> None:
-        status = self.geo_lookup.local_db.status(str(self.vars["geoip_db_path"].get()))
+    def _geoip_status_text(self, custom_path: str) -> str:
+        status = self.geo_lookup.local_db.status(custom_path)
+        location = self._t("默认位置") if status.managed else self._t("自定义文件")
         if status.updating:
             text = self._t("本地库：正在下载……")
         elif status.available:
             built = datetime.fromtimestamp(status.build_epoch).strftime("%Y-%m-%d") if status.build_epoch else "?"
-            text = self._t("本地库：可用，数据日期 {date}；{path}", date=built, path=status.path)
+            text = self._t(
+                "本地库（{location}）：可用，数据日期 {date}；{path}",
+                location=location,
+                date=built,
+                path=status.path,
+            )
         else:
-            text = self._t("本地库：不可用（{path}）", path=status.path)
-        if status.last_error:
+            text = self._t("本地库（{location}）：不可用（{path}）", location=location, path=status.path)
+        if status.managed and status.last_error:
             text += "；" + self._t("上次更新失败：{error}", error=status.last_error)
-        self.geoip_status.set(text)
+        return text
+
+    def _refresh_geoip_status(self) -> None:
+        self.geoip_status.set(self._geoip_status_text(str(self.vars["geoip_db_path"].get())))
+
+    def _choose_geoip_db(self) -> None:
+        current = str(self.vars["geoip_db_path"].get()).strip()
+        initial = Path(current).parent if current else self.geo_lookup.local_db.data_dir
+        selected = filedialog.askopenfilename(
+            parent=self.root,
+            title=self._t("选择 GeoIP 数据库文件"),
+            initialdir=str(initial) if initial.is_dir() else None,
+            filetypes=[(self._t("MaxMind 数据库"), "*.mmdb"), (self._t("所有文件"), "*.*")],
+        )
+        if not selected:
+            return
+        try:
+            validate_database(Path(selected))
+        except Exception as exc:
+            messagebox.showerror(
+                self._t("无效的 GeoIP 数据库"),
+                self._t("无法使用该文件：{error}", error=exc),
+                parent=self.root,
+            )
+            return
+        self.vars["geoip_db_path"].set(str(Path(selected)))
+        self.status.set(self._t("已选择自定义 GeoIP 文件；点击保存后生效。"))
+
+    def _reset_geoip_db_path(self) -> None:
+        self.vars["geoip_db_path"].set("")
+        self.status.set(self._t("已还原为默认 GeoIP 文件位置；点击保存后生效。"))
 
     def _update_geoip_db(self) -> None:
         if self.updating_geoip:
@@ -722,20 +771,39 @@ class SettingsWindow:
             command=self._test_ip,
         ).pack(side="left")
         ttk.Label(actions, textvariable=self.last_checked).pack(side="right")
-        ttk.Label(parent, textvariable=self.proxy_status, foreground="#555555").pack(anchor="w", pady=(0, 8))
+        ttk.Label(
+            parent, textvariable=self.proxy_status, foreground="#555555", wraplength=800
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            parent, textvariable=self.geoip_result_status, foreground="#555555", wraplength=800
+        ).pack(anchor="w", pady=(0, 8))
 
-        columns = ("source", "ip", "country", "state")
+        columns = ("source", "ip", "source_country", "geo_country", "geo_source", "state")
         self.result_tree = ttk.Treeview(parent, columns=columns, show="headings", height=12)
         headings = {
             "source": self._t("查询路径"),
             "ip": self._t("本机公网出口 IP"),
-            "country": self._t("国家/地区"),
+            "source_country": self._t("查询源地区"),
+            "geo_country": self._t("GeoIP 地区"),
+            "geo_source": self._t("GeoIP 来源"),
             "state": self._t("策略结果"),
         }
-        widths = {"source": 250, "ip": 180, "country": 100, "state": 100}
+        widths = {
+            "source": 160,
+            "ip": 140,
+            "source_country": 80,
+            "geo_country": 80,
+            "geo_source": 200,
+            "state": 80,
+        }
         for column in columns:
             self.result_tree.heading(column, text=headings[column])
-            self.result_tree.column(column, width=widths[column], minwidth=80, stretch=column == "source")
+            self.result_tree.column(
+                column,
+                width=widths[column],
+                minwidth=60,
+                stretch=column in {"source", "geo_source"},
+            )
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.result_tree.yview)
         self.result_tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
@@ -834,7 +902,14 @@ class SettingsWindow:
         self.last_checked.set(self._t("检测中……"))
 
         def worker() -> None:
-            rows: list[tuple[str, str, str, str]] = []
+            rows: list[tuple[str, ...]] = []
+            if config.geo_lookup_mode == "local":
+                geoip_summary = self._t(
+                    "GeoIP：本地库优先；{status}",
+                    status=self._geoip_status_text(config.geoip_db_path),
+                )
+            else:
+                geoip_summary = self._t("GeoIP：仅在线接口")
             clash_status = ClashDetector().detect(config)
             configured_network_mode = config.ip_query_network_mode
             effective_network_mode = resolve_ip_query_network_mode(config, clash_status)
@@ -867,47 +942,75 @@ class SettingsWindow:
                         state = self._t("无法确认")
                     else:
                         state = self._t("合规")
-                    source = " + ".join(
-                        urlparse(part.strip()).netloc or part.strip()
-                        for part in info.provider.split(" + ")
-                    )
-                    rows.append((source, info.ip, info.country_code, state))
+                    rows.append(self._result_row(info, state))
                 blocked_state = self._t("不合规")
                 unknown_state = self._t("无法确认")
-                failed = sum(1 for row in rows if row[3] == blocked_state)
-                unknown = sum(1 for row in rows if row[3] == unknown_state)
+                failed = sum(1 for row in rows if row[-1] == blocked_state)
+                unknown = sum(1 for row in rows if row[-1] == unknown_state)
                 message = self._t(
                     "检测完成：{count} 个路径，{failed} 个不合规，{unknown} 个无法确认。",
                     count=len(rows),
                     failed=failed,
                     unknown=unknown,
                 )
+                mismatched = sorted(
+                    {row[1] for row in rows if row[2] != "-" and row[3] != "-" and row[2] != row[3]}
+                )
+                if mismatched:
+                    message += " " + self._t(
+                        "以下 IP 的查询源地区与 GeoIP 地区不一致，策略以 GeoIP 为准：{ips}",
+                        ips=", ".join(mismatched),
+                    )
             except Exception as exc:
                 message = self._t("测试失败：{error}", error=exc)
             try:
-                self.root.after(0, lambda: self._finish_test(message, rows, proxy_summary))
+                self.root.after(
+                    0, lambda: self._finish_test(message, rows, proxy_summary, geoip_summary)
+                )
             except (tk.TclError, RuntimeError):
                 pass
 
         threading.Thread(target=worker, name="settings-ip-test", daemon=True).start()
 
+    def _result_row(self, info: IpInfo, state: str) -> tuple[str, ...]:
+        """Columns: IP source, IP, source region, GeoIP region, GeoIP source, policy state."""
+        source_url = info.source_provider or info.provider
+        source = urlparse(source_url).netloc or source_url
+        if info.geo_provider:
+            source_country = info.source_country_code or "-"
+            geo_country = info.country_code
+            if info.geo_provider.startswith("local:"):
+                geo_source = self._t("本地库 {name}", name=info.geo_provider[len("local:"):])
+            else:
+                geo_source = self._t(
+                    "在线接口 {host}",
+                    host=urlparse(info.geo_provider).netloc or info.geo_provider,
+                )
+        else:
+            source_country = info.country_code
+            geo_country = "-"
+            geo_source = self._t("未获取（使用查询源地区）")
+        return (source, info.ip, source_country, geo_country, geo_source, state)
+
     def _finish_test(
         self,
         message: str,
-        rows: list[tuple[str, str, str, str]],
+        rows: list[tuple[str, ...]],
         proxy_summary: str,
+        geoip_summary: str = "",
     ) -> None:
         self.testing = False
         self._refresh_geoip_status()
         self.status.set(message)
         self.proxy_status.set(proxy_summary)
+        self.geoip_result_status.set(geoip_summary)
         self.last_checked.set(
             self._t("最近检测：{time}", time=datetime.now().strftime("%H:%M:%S"))
         )
         for item in self.result_tree.get_children():
             self.result_tree.delete(item)
         for row in rows:
-            self.result_tree.insert("", "end", values=row, tags=(row[3],))
+            self.result_tree.insert("", "end", values=row, tags=(row[-1],))
         self.result_tree.tag_configure(self._t("合规"), foreground="#15803d")
         self.result_tree.tag_configure(self._t("不合规"), foreground="#b91c1c")
         self.result_tree.tag_configure(self._t("无法确认"), foreground="#b45309")

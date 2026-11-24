@@ -4,7 +4,9 @@
 - New setting `geo_lookup_mode` (Settings → Providers → Region lookup). The default is `local`: the region of each egress IP is read from a local mmdb file, and the online GeoIP providers are called only when the file is missing or has no record. `api` keeps the previous online-only behavior.
 - The default database is `Country-without-asn.mmdb` from [Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip). It is downloaded in the background to the configuration folder on first use, verified with its SHA-256 file, and refreshed every 7 days. Failed downloads are retried after 1 hour; until then the online providers are used.
 - `geoip_db_path` can point at any GeoLite2/GeoIP2 Country compatible file, such as the `Country.mmdb` from Clash or mihomo. Custom files are never downloaded or overwritten.
-- The Providers tab is now scrollable and shows the database status, with an **Update local database** button.
+- The Providers tab is now scrollable and shows the database status, with **Choose file...**, **Restore default location**, and **Update local database** buttons. A custom path is checked when saving and must point at an existing file.
+- The Results tab shows the region reported by each IP provider and the GeoIP region side by side, plus where the GeoIP region came from (local database or online API). A summary line shows the lookup mode and database status, and IPs whose two regions differ are listed after a test.
+- Fixed: the region from `ip.api.skk.moe` could be read from its coordinate field `loc`. Only two-letter ISO codes are accepted now.
 - New dependency: `maxminddb`.
 
 ## v1.6.0

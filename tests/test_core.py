@@ -339,6 +339,10 @@ class LocalGeoLookupTests(unittest.TestCase):
             result = self.lookup.lookup_all(self.config)
         self.assertEqual("CN", result[0].country_code)
         self.assertIn("local:Country.mmdb", result[0].provider)
+        # The provider's own answer is kept so the results view can compare them.
+        self.assertEqual("US", result[0].source_country_code)
+        self.assertEqual("https://current.example/ip", result[0].source_provider)
+        self.assertEqual("local:Country.mmdb", result[0].geo_provider)
         self.assertEqual({}, self.lookup.geo_query_count)
 
     def test_local_miss_falls_back_to_online_geo_provider(self) -> None:
@@ -494,6 +498,14 @@ class ProviderTests(unittest.TestCase):
         )
         registry_proxies.assert_called_once_with()  # type: ignore[attr-defined]
         environment_proxies.assert_not_called()  # type: ignore[attr-defined]
+
+    @patch("urllib.request.build_opener")
+    def test_coordinate_loc_is_not_used_as_country_code(self, build_opener: object) -> None:
+        build_opener.return_value = FakeOpener([  # type: ignore[attr-defined]
+            FakeResponse({"ip": "104.251.229.180", "loc": "35.6895,139.6917", "country": "JP"})
+        ])
+        info = GeoLookup()._lookup_provider("https://ip.api.skk.moe/v1/ipinfo-simple", 8)
+        self.assertEqual("JP", info.country_code)
 
     @patch("urllib.request.build_opener")
     def test_cloudflare_trace_response_is_supported(self, build_opener: object) -> None:
