@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 import psutil
 
+from .geoip_db import LocalGeoDatabase
 from .i18n import SUPPORTED_LANGUAGES, effective_language, translate
 
 LOG = logging.getLogger("kiro_ip_guard")
@@ -41,6 +42,10 @@ _REPEAT_LOG_SECONDS = 10 * 60
 
 POLICY_MODES = {"allowlist", "blocklist", "combined"}
 NETWORK_MODES = {"auto", "direct", "system_proxy"}
+# local: look up the region in a local mmdb first and call the online GeoIP
+# providers only when the file is missing or has no country record.
+# api: online GeoIP providers only (previous behavior).
+GEO_LOOKUP_MODES = {"local", "api"}
 DEFAULT_CLASH_PROCESS_NAMES = (
     "clash",
     "clash.exe",
@@ -110,6 +115,8 @@ class GuardConfig:
     enabled: bool = True
     policy_mode: str = "combined"
     ip_query_network_mode: str = "auto"
+    geo_lookup_mode: str = "local"
+    geoip_db_path: str = ""
     language: str = "auto"
     check_updates: bool = True
     auto_install_updates: bool = True
@@ -159,6 +166,16 @@ class GuardConfig:
             self.language = "zh-CN"
         if self.language not in SUPPORTED_LANGUAGES:
             raise ValueError("language must be auto, zh-CN, or en")
+        self.geo_lookup_mode = str(self.geo_lookup_mode or "local").strip().lower()
+        if self.geo_lookup_mode not in GEO_LOOKUP_MODES:
+            raise ValueError(
+                translate(
+                    self.language,
+                    "geo_lookup_mode 必须是 local 或 api，当前值: {value}",
+                    value=self.geo_lookup_mode,
+                )
+            )
+        self.geoip_db_path = str(self.geoip_db_path or "").strip()
         self.check_updates = bool(self.check_updates)
         self.auto_install_updates = bool(self.auto_install_updates)
         self.check_interval_seconds = max(1, int(self.check_interval_seconds))
@@ -351,10 +368,15 @@ def evaluate_policy(info: IpInfo, config: GuardConfig) -> PolicyResult:
 
 
 class GeoLookup:
-    def __init__(self) -> None:
+    def __init__(self, data_dir: Optional[Path] = None) -> None:
         self._cache_lock = threading.RLock()
         self._geo_refresh_lock = threading.Lock()
         self._geo_cache: dict[tuple[object, ...], tuple[float, IpInfo]] = {}
+        # Downloads follow the OS proxy when one is set; TUN routes apply either way.
+        self.local_db = LocalGeoDatabase(
+            data_dir or default_config_dir(),
+            proxies_provider=get_system_proxies,
+        )
 
     def clear_cache(self) -> None:
         with self._cache_lock:
@@ -367,30 +389,34 @@ class GeoLookup:
         # The current public IP is intentionally never cached. Every policy check
         # asks every configured IP provider again so an egress change is detected.
         raw_results = self._query_current_ips(config)
-        if not config.geo_providers:
-            return raw_results
-
-        first_by_ip: dict[str, IpInfo] = {}
-        for info in raw_results:
-            first_by_ip.setdefault(info.ip, info)
+        unique_ips = list(dict.fromkeys(info.ip for info in raw_results))
 
         geo_by_ip: dict[str, IpInfo | None] = {}
-        workers = max(1, min(len(first_by_ip), 8))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="geo-provider") as executor:
-            futures = {
-                executor.submit(
-                    self._lookup_geo_for_ip,
-                    info.ip,
-                    config,
-                    force_refresh,
-                ): info.ip
-                for info in first_by_ip.values()
-            }
-            for future in as_completed(futures):
-                ip = futures[future]
-                geo_by_ip[ip] = future.result()
+        if config.geo_lookup_mode == "local":
+            # A local lookup takes microseconds, so it needs no cache and
+            # never sends the egress IP to a third party.
+            for ip in unique_ips:
+                geo_by_ip[ip] = self._lookup_local_geo(ip, config)
+
+        pending = [ip for ip in unique_ips if geo_by_ip.get(ip) is None]
+        if pending and config.geo_providers:
+            workers = max(1, min(len(pending), 8))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="geo-provider") as executor:
+                futures = {
+                    executor.submit(self._lookup_geo_for_ip, ip, config, force_refresh): ip
+                    for ip in pending
+                }
+                for future in as_completed(futures):
+                    geo_by_ip[futures[future]] = future.result()
 
         return tuple(self._merge_geo(info, geo_by_ip.get(info.ip)) for info in raw_results)
+
+    def _lookup_local_geo(self, ip: str, config: GuardConfig) -> IpInfo | None:
+        found = self.local_db.lookup(ip, config.geoip_db_path)
+        if found is None:
+            return None
+        code, name, path = found
+        return IpInfo(ip=ip, country_code=code, country_name=name, provider=f"local:{path.name}")
 
     def _query_current_ips(self, config: GuardConfig) -> tuple[IpInfo, ...]:
         errors: list[str] = []
@@ -763,7 +789,7 @@ class GuardService:
         on_result: Optional[Callable[[CheckResult], None]] = None,
     ) -> None:
         self.config_path = config_path
-        self.lookup = lookup or GeoLookup()
+        self.lookup = lookup or GeoLookup(config_path.parent)
         self.terminator = terminator or ProcessTerminator()
         self.clash_detector = clash_detector or ClashDetector()
         self.on_result = on_result

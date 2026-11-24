@@ -3,6 +3,8 @@
   "enabled": true,
   "policy_mode": "combined",
   "ip_query_network_mode": "auto",
+  "geo_lookup_mode": "local",
+  "geoip_db_path": "",
   "language": "auto",
   "check_updates": true,
   "check_interval_seconds": 1,

@@ -186,8 +186,8 @@ class SwitchingGeoLookup(GeoLookup):
         "1.1.1.1": ("AU", "Australia"),
     }
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, data_dir: Path | None = None) -> None:
+        super().__init__(data_dir)
         self.current_ip = "8.8.8.8"
         self.ip_query_count = 0
         self.geo_query_count: dict[str, int] = {}
@@ -218,6 +218,7 @@ class CacheTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = GuardConfig(
             cache_ttl_seconds=600,
+            geo_lookup_mode="api",
             providers=["https://current.example/ip"],
             geo_providers=["https://geo.example/{ip}"],
         ).normalized()
@@ -310,6 +311,95 @@ class CacheTests(unittest.TestCase):
         self.assertEqual({"8.8.8.8": 1}, lookup.geo_query_count)
 
 
+class LocalGeoLookupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.lookup = SwitchingGeoLookup(Path(self.directory.name))
+        self.config = GuardConfig(
+            providers=["https://current.example/ip"],
+            geo_providers=["https://geo.example/{ip}"],
+            claude_route_checks_enabled=False,
+        ).normalized()
+
+    def test_default_mode_is_local(self) -> None:
+        self.assertEqual("local", GuardConfig().normalized().geo_lookup_mode)
+        self.assertEqual("", GuardConfig().normalized().geoip_db_path)
+
+    def test_invalid_geo_lookup_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "geo_lookup_mode"):
+            GuardConfig(geo_lookup_mode="other").normalized()
+
+    def test_local_hit_skips_online_geo_provider(self) -> None:
+        with patch.object(
+            self.lookup.local_db,
+            "lookup",
+            return_value=("CN", "China", Path("Country.mmdb")),
+        ):
+            result = self.lookup.lookup_all(self.config)
+        self.assertEqual("CN", result[0].country_code)
+        self.assertIn("local:Country.mmdb", result[0].provider)
+        self.assertEqual({}, self.lookup.geo_query_count)
+
+    def test_local_miss_falls_back_to_online_geo_provider(self) -> None:
+        with patch.object(self.lookup.local_db, "lookup", return_value=None):
+            result = self.lookup.lookup_all(self.config)
+        self.assertEqual("US", result[0].country_code)
+        self.assertEqual({"8.8.8.8": 1}, self.lookup.geo_query_count)
+
+    def test_api_mode_never_reads_local_database(self) -> None:
+        self.config.geo_lookup_mode = "api"
+        with patch.object(self.lookup.local_db, "lookup") as local_lookup:
+            self.lookup.lookup_all(self.config)
+        local_lookup.assert_not_called()
+        self.assertEqual({"8.8.8.8": 1}, self.lookup.geo_query_count)
+
+    def test_missing_managed_database_downloads_in_background_once(self) -> None:
+        database = self.lookup.local_db
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_update() -> Path:
+            started.set()
+            release.wait(2)
+            raise RuntimeError("offline")
+
+        with patch.object(database, "update", side_effect=fake_update) as update:
+            self.assertIsNone(database.lookup("8.8.8.8"))
+            self.assertTrue(started.wait(2))
+            self.assertIsNone(database.lookup("8.8.8.8"))
+            release.set()
+            for _ in range(100):
+                if not database.status().updating:
+                    break
+                time.sleep(0.01)
+            # A failed download is retried only after the back-off period.
+            self.assertIsNone(database.lookup("8.8.8.8"))
+        self.assertEqual(1, update.call_count)
+
+    def test_custom_database_path_is_never_downloaded(self) -> None:
+        database = self.lookup.local_db
+        with patch.object(database, "update") as update:
+            self.assertIsNone(database.lookup("8.8.8.8", str(Path(self.directory.name) / "none.mmdb")))
+        update.assert_not_called()
+
+    def test_corrupt_database_is_treated_as_missing(self) -> None:
+        path = Path(self.directory.name) / "broken.mmdb"
+        path.write_bytes(b"not an mmdb")
+        self.assertIsNone(self.lookup.local_db.lookup("8.8.8.8", str(path)))
+        self.assertFalse(self.lookup.local_db.status(str(path)).available)
+
+    def test_non_country_records_are_ignored(self) -> None:
+        from ip_guard.geoip_db import _country_from_record
+
+        self.assertIsNone(_country_from_record({"country": {"iso_code": "PRIVATE"}}))
+        self.assertIsNone(_country_from_record(None))
+        self.assertEqual(
+            ("US", "United States"),
+            _country_from_record({"country": {"iso_code": "us", "names": {"en": "United States"}}}),
+        )
+
+
 class ProviderTests(unittest.TestCase):
     @patch("ip_guard.core.get_system_proxies")
     @patch("urllib.request.build_opener")
@@ -346,6 +436,7 @@ class ProviderTests(unittest.TestCase):
         config = GuardConfig(
             claude_route_checks_enabled=False,
             ip_query_network_mode="direct",
+            geo_lookup_mode="api",
             providers=["https://ip.api.skk.moe/v1/ipinfo-simple"],
             geo_providers=["https://ip.net.coffee/api/geoip/{ip}"],
         ).normalized()
@@ -373,6 +464,7 @@ class ProviderTests(unittest.TestCase):
         config = GuardConfig(
             claude_route_checks_enabled=False,
             ip_query_network_mode="system_proxy",
+            geo_lookup_mode="api",
             providers=["https://current.example/ip"],
             geo_providers=[],
         ).normalized()

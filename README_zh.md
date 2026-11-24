@@ -29,7 +29,8 @@ Kiro IP Guard 是一个 Windows / macOS 托盘守卫程序。它检查系统代�
 - 支持国家/地区白名单、黑名单，以及精确 IP 或 CIDR 黑名单。
 - Windows 和 macOS 均按**进程名精确匹配**终止 `kiro` / `kiro-cli`，不会按命令行模糊匹配。
 - 并发查询多家来源：SKK IP API、ipwho.is、ipapi.co；单家失败不影响其他结果。
-- 对每个成功观测的出口使用 Net.Coffee GeoIP API 补充国家/地区，补充失败时使用 IP 源自身结果。
+- 国家/地区默认用本地 GeoIP 数据库（[Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip) 的 `Country-without-asn.mmdb`）判断，查询不到 1 毫秒，且不把出口 IP 发给第三方；首次运行自动下载，之后每 7 天自动更新。
+- 本地库缺失或没有该 IP 的记录时，回退到 Net.Coffee GeoIP API；接口也失败时使用 IP 源自身结果。可在“查询源”页切换为“仅在线接口”。
 - 只要任一成功观测的出口不合规就执行终止，可发现按域名分流产生的不同出口。
 - 默认“查询失败不杀进程”，可切换为故障关闭模式。
 - 支持中文、English 和跟随系统语言，设置保存后托盘与设置窗口自动采用所选语言。
@@ -121,6 +122,8 @@ python3 -m venv .venv
 | `policy_mode` | `combined` | `allowlist`、`blocklist` 或 `combined` |
 | `config_version` | `2` | 配置格式版本；旧版默认 `direct` 会在首次加载时自动迁移为 `auto` |
 | `ip_query_network_mode` | `auto` | `auto` 在系统代理启用时查代理出口，否则走直连/TUN 路由；另两项为手动固定模式 |
+| `geo_lookup_mode` | `local` | `local`：本地 mmdb 优先，缺失或未命中时回退到 `geo_providers`；`api`：只用 `geo_providers` |
+| `geoip_db_path` | `""` | 留空时使用配置目录下自动下载、每 7 天更新的 `Country-without-asn.mmdb`；也可填 Clash/mihomo 的 `Country.mmdb` 等 GeoLite2 兼容文件（自定义文件不会自动更新） |
 | `language` | `auto` | `zh-CN`、`en` 或 `auto`（跟随系统语言） |
 | `check_updates` | `true` | 启动后及每 2 小时检查一次 GitHub Releases；失败不影响防护 |
 | `check_interval_seconds` | `1` | 策略检查周期，最小 1 秒；每次都会重新判断是否合规 |

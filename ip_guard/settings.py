@@ -17,6 +17,7 @@ from .autostart import install_autostart, is_autostart_installed, remove_autosta
 from .core import (
     ClashDetector,
     GeoLookup,
+    GEO_LOOKUP_MODES,
     GuardConfig,
     NETWORK_MODES,
     POLICY_MODES,
@@ -102,6 +103,10 @@ def config_from_form(values: Mapping[str, object]) -> GuardConfig:
     network_mode = str(values.get("ip_query_network_mode", "")).strip().lower()
     if network_mode not in NETWORK_MODES:
         raise ValueError(text("网络检测模式必须选择自动、本机直连或系统代理出口"))
+    geo_lookup_mode = str(values.get("geo_lookup_mode", "local") or "local").strip().lower()
+    if geo_lookup_mode not in GEO_LOOKUP_MODES:
+        raise ValueError(text("国家/地区判断方式必须选择本地 GeoIP 数据库优先或仅在线接口"))
+    geoip_db_path = str(values.get("geoip_db_path", "") or "").strip()
 
     try:
         interval = int(str(values.get("check_interval_seconds", "")).strip())
@@ -171,6 +176,8 @@ def config_from_form(values: Mapping[str, object]) -> GuardConfig:
         enabled=_as_bool(values.get("enabled")),
         policy_mode=policy_mode,
         ip_query_network_mode=network_mode,
+        geo_lookup_mode=geo_lookup_mode,
+        geoip_db_path=geoip_db_path,
         language=language,
         check_updates=_as_bool(values.get("check_updates", True)),
         auto_install_updates=_as_bool(values.get("auto_install_updates", True)),
@@ -198,10 +205,14 @@ class SettingsWindow:
         self.language = config.language
         self.testing = False
         self.checking_updates = False
+        self.updating_geoip = False
+        self.geo_lookup = GeoLookup(config_path.parent)
         self.vars: dict[str, tk.Variable] = {
             "enabled": tk.BooleanVar(),
             "policy_mode": tk.StringVar(),
             "ip_query_network_mode": tk.StringVar(),
+            "geo_lookup_mode": tk.StringVar(),
+            "geoip_db_path": tk.StringVar(),
             "language": tk.StringVar(),
             "check_updates": tk.BooleanVar(),
             "auto_install_updates": tk.BooleanVar(),
@@ -220,6 +231,7 @@ class SettingsWindow:
         self.last_checked = tk.StringVar(value=self._t("尚未检测"))
         self.proxy_status = tk.StringVar(value=self._t("系统代理：尚未读取"))
         self.update_status = tk.StringVar(value=self._t("尚未检查更新"))
+        self.geoip_status = tk.StringVar()
 
         root.title(f"Kiro IP Guard v{__version__} {self._t('设置')}")
         apply_tk_window_icon(root)
@@ -235,6 +247,7 @@ class SettingsWindow:
         self._build_ui()
         self._load_into_form(config)
         self._refresh_autostart_status()
+        self._refresh_geoip_status()
         root.protocol("WM_DELETE_WINDOW", root.destroy)
 
     def _t(self, text: str, **values: object) -> str:
@@ -295,17 +308,19 @@ class SettingsWindow:
         notebook.grid(row=2, column=0, sticky="nsew")
         basic_page = ttk.Frame(notebook, padding=(4, 8, 4, 4))
         startup = ttk.Frame(notebook, padding=14)
-        advanced = ttk.Frame(notebook, padding=14)
+        advanced_page = ttk.Frame(notebook, padding=(4, 8, 4, 4))
         results = ttk.Frame(notebook, padding=14)
         notebook.add(basic_page, text=self._t("策略与监控"))
         notebook.add(startup, text=self._t("启动与更新"))
-        notebook.add(advanced, text=self._t("查询源"))
+        notebook.add(advanced_page, text=self._t("查询源"))
         notebook.add(results, text=self._t("检测结果"))
         basic_scroller = ScrollableFrame(basic_page)
         basic_scroller.pack(fill="both", expand=True)
         self._build_basic_tab(basic_scroller.content)
         self._build_startup_tab(startup)
-        self._build_advanced_tab(advanced)
+        advanced_scroller = ScrollableFrame(advanced_page)
+        advanced_scroller.pack(fill="both", expand=True)
+        self._build_advanced_tab(advanced_scroller.content)
         self._build_results_tab(results)
 
         ttk.Separator(outer).grid(row=3, column=0, sticky="ew", pady=(12, 8))
@@ -607,6 +622,89 @@ class SettingsWindow:
             5,
             self._t("每行一个，必须包含 {ip} 占位符", ip="{ip}"),
         )
+        self._build_geo_lookup_frame(parent, 7)
+
+    def _build_geo_lookup_frame(self, parent: ttk.Frame, row: int) -> None:
+        frame = ttk.LabelFrame(parent, text=self._t("国家/地区判断方式"), padding=8)
+        frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        frame.columnconfigure(1, weight=1)
+        ttk.Radiobutton(
+            frame,
+            text=self._t("本地 GeoIP 数据库优先（推荐；本地库缺失或未命中时回退到 GeoIP 补充源）"),
+            value="local",
+            variable=self.vars["geo_lookup_mode"],
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Radiobutton(
+            frame,
+            text=self._t("仅在线接口（使用上方 GeoIP 补充源）"),
+            value="api",
+            variable=self.vars["geo_lookup_mode"],
+        ).grid(row=1, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text=self._t("本地数据库路径")).grid(
+            row=2, column=0, sticky="w", padx=(0, 12), pady=(8, 0)
+        )
+        ttk.Entry(frame, textvariable=self.vars["geoip_db_path"]).grid(
+            row=2, column=1, sticky="ew", pady=(8, 0)
+        )
+        ttk.Button(frame, text=self._t("立即更新本地库"), command=self._update_geoip_db).grid(
+            row=2, column=2, sticky="e", padx=(8, 0), pady=(8, 0)
+        )
+        ttk.Label(
+            frame,
+            text=self._t(
+                "留空时自动下载 Loyalsoldier/geoip 的 Country-without-asn.mmdb 并每 7 天更新；也可填写 Clash/mihomo 的 Country.mmdb 等 GeoLite2 兼容文件（不会自动更新）"
+            ),
+            wraplength=760,
+            foreground="#666666",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Label(frame, textvariable=self.geoip_status, foreground="#555555").grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0)
+        )
+
+    def _refresh_geoip_status(self) -> None:
+        status = self.geo_lookup.local_db.status(str(self.vars["geoip_db_path"].get()))
+        if status.updating:
+            text = self._t("本地库：正在下载……")
+        elif status.available:
+            built = datetime.fromtimestamp(status.build_epoch).strftime("%Y-%m-%d") if status.build_epoch else "?"
+            text = self._t("本地库：可用，数据日期 {date}；{path}", date=built, path=status.path)
+        else:
+            text = self._t("本地库：不可用（{path}）", path=status.path)
+        if status.last_error:
+            text += "；" + self._t("上次更新失败：{error}", error=status.last_error)
+        self.geoip_status.set(text)
+
+    def _update_geoip_db(self) -> None:
+        if self.updating_geoip:
+            return
+        if str(self.vars["geoip_db_path"].get()).strip():
+            messagebox.showinfo(
+                self._t("立即更新本地库"),
+                self._t("已填写自定义路径，程序不会覆盖该文件。请清空路径以使用自动下载的数据库。"),
+                parent=self.root,
+            )
+            return
+        self.updating_geoip = True
+        self.geoip_status.set(self._t("本地库：正在下载……"))
+
+        def worker() -> None:
+            error: Exception | None = None
+            try:
+                self.geo_lookup.local_db.update()
+            except Exception as exc:
+                error = exc
+            try:
+                self.root.after(0, lambda: self._finish_geoip_update(error))
+            except (tk.TclError, RuntimeError):
+                pass
+
+        threading.Thread(target=worker, name="settings-geoip-update", daemon=True).start()
+
+    def _finish_geoip_update(self, error: Exception | None) -> None:
+        self.updating_geoip = False
+        self._refresh_geoip_status()
+        if error is not None:
+            messagebox.showerror(self._t("本地库更新失败"), str(error), parent=self.root)
 
     def _build_results_tab(self, parent: ttk.Frame) -> None:
         ttk.Label(
@@ -760,7 +858,7 @@ class SettingsWindow:
                 summary=network_summary,
             )
             try:
-                infos = GeoLookup().lookup_all(config, force_refresh=True)
+                infos = self.geo_lookup.lookup_all(config, force_refresh=True)
                 for info in infos:
                     policy = evaluate_policy(info, config)
                     if not policy.compliant or (config.clash_required and clash_status.active is False):
@@ -800,6 +898,7 @@ class SettingsWindow:
         proxy_summary: str,
     ) -> None:
         self.testing = False
+        self._refresh_geoip_status()
         self.status.set(message)
         self.proxy_status.set(proxy_summary)
         self.last_checked.set(

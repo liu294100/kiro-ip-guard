@@ -9,6 +9,7 @@ Kiro IP Guard is a Windows and macOS tray application that requires an active sy
 - Exact process-name matching for `kiro` and `kiro-cli` on Windows and macOS.
 - Combined system proxy/TUN/VPN and public-IP policy checks.
 - Concurrent public IP queries with per-IP GeoIP caching.
+- Local GeoIP database first: regions come from [Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip) `Country-without-asn.mmdb`, downloaded on first run and refreshed every 7 days. Online GeoIP providers are used only when the database is missing or has no record. Set `geo_lookup_mode` to `api` to use online providers only, or point `geoip_db_path` at another GeoLite2-compatible file such as the `Country.mmdb` used by Clash/mihomo.
 - Chinese, English, and system-language UI modes.
 - User-level login startup.
 - Optional GitHub Releases checks at startup and every 2 hours.
@@ -86,7 +87,7 @@ git push origin v1.4.0
 
 ## Privacy and permissions
 
-The app reads local process names, TCP listeners, system proxy settings, and network-interface state. It sends public-IP requests to the configured providers and sends an IP to configured GeoIP providers when its region cache is missing or expired. Logs are stored beside the configuration file. The app does not modify proxy, VPN, routing, or Kiro files.
+The app reads local process names, TCP listeners, system proxy settings, and network-interface state. It sends public-IP requests to the configured providers and sends an IP to configured GeoIP providers only when the local GeoIP database cannot answer (or always, in `api` mode) and its region cache is missing or expired. The local database is downloaded from GitHub (raw.githubusercontent.com, with jsDelivr as a fallback) and verified with its published SHA-256 checksum. Logs are stored beside the configuration file. The app does not modify proxy, VPN, routing, or Kiro files.
 
 ## Verify
 

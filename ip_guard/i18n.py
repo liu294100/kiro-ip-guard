@@ -198,6 +198,20 @@ EN_TRANSLATIONS = {
     "故障关闭策略已终止 {count} 个 Kiro 进程": "Fail-closed policy terminated {count} Kiro processes",
     "状态无法确认，未终止进程": "Status unknown; no processes were terminated",
     "代理状态与公网 IP 联合检查通过": "Proxy status and public IP policy check passed",
+    "geo_lookup_mode 必须是 local 或 api，当前值: {value}": "geo_lookup_mode must be local or api; current value: {value}",
+    "国家/地区判断方式必须选择本地 GeoIP 数据库优先或仅在线接口": "Region lookup must be local GeoIP database first or online API only",
+    "国家/地区判断方式": "Region lookup",
+    "本地 GeoIP 数据库优先（推荐；本地库缺失或未命中时回退到 GeoIP 补充源）": "Local GeoIP database first (recommended; falls back to the GeoIP providers when the database is missing or has no record)",
+    "仅在线接口（使用上方 GeoIP 补充源）": "Online API only (use the GeoIP providers above)",
+    "本地数据库路径": "Local database path",
+    "立即更新本地库": "Update local database",
+    "留空时自动下载 Loyalsoldier/geoip 的 Country-without-asn.mmdb 并每 7 天更新；也可填写 Clash/mihomo 的 Country.mmdb 等 GeoLite2 兼容文件（不会自动更新）": "Leave blank to download Loyalsoldier/geoip Country-without-asn.mmdb automatically and refresh it every 7 days. You can also enter a GeoLite2-compatible file such as the Country.mmdb used by Clash/mihomo (not updated automatically).",
+    "本地库：正在下载……": "Local database: downloading...",
+    "本地库：可用，数据日期 {date}；{path}": "Local database: available, data date {date}; {path}",
+    "本地库：不可用（{path}）": "Local database: unavailable ({path})",
+    "上次更新失败：{error}": "last update failed: {error}",
+    "已填写自定义路径，程序不会覆盖该文件。请清空路径以使用自动下载的数据库。": "A custom path is set, so the app will not overwrite that file. Clear the path to use the automatically downloaded database.",
+    "本地库更新失败": "Local database update failed",
 }
 
 

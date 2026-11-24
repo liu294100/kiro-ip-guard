@@ -1,4 +1,5 @@
 certifi==2026.10.23
+maxminddb==3.3.0
 Pillow==11.3.0
 psutil==7.0.0
 pystray==0.19.5
